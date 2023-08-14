@@ -1,12 +1,15 @@
 import traceback
 from fastapi.responses import JSONResponse
+from psycopg2 import IntegrityError
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import IntegrityError
 
-from model.schemas import Comentario, Projeto, AlterarInfoProjeto, Tarefa, Usuario,  Etapa
+from services.usuario_service import UsuarioLoginService
+from services.etapa_service import EtapaService
+from model.schemas import  Projeto
 from database.models import ComentarioModel, EtapaModel, ProjetoModel, ProjetoParticipanteModel, TarefaModel, ViewInfosParticipantesProjetoModel
 from fastapi import status
 from fastapi.exceptions import HTTPException
+
 
 class ProjetoService:
     def __init__(self, db_session:Session):
@@ -71,28 +74,6 @@ class ProjetoService:
                 },
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-        
-    def listar_etapas(self, projeto_id:int):
-        # Lógica para listar as etapas de um projeto específico
-        projeto = self.db_session.query(ProjetoModel).filter_by(id_projeto = projeto_id).first()
-
-        if not projeto:
-            return None, JSONResponse(
-                content={'error': 'Projeto não encontrado'},
-                status_code=status.HTTP_404_NOT_FOUND
-            )
-
-        etapas = self.db_session.query(EtapaModel).filter_by(id_projeto = projeto_id).all()
-
-        etapas_dict = []
-        for etapa in etapas:
-            etapa_dict = {
-                'id_etapa': etapa.id_etapa,
-                'nome': etapa.nome
-            }
-            etapas_dict.append(etapa_dict)
-        
-        return etapas_dict
     
     def listar_projetos(self):
         # Buscar os projetos do usuário no banco de dados
@@ -173,167 +154,158 @@ class ProjetoService:
 
         return infos_projetos
 
-    def editar_nome(self, id_projeto, novoValorCampo):
-        projeto = self.db_session.query(ProjetoModel).filter_by(id_projeto=id_projeto).first()
-        projeto.nome = novoValorCampo
-        self.db_session.commit()
-        self.db_session.refresh(projeto)
+    def editar_projeto(self, id_projeto: int, projeto_alteracao: Projeto):
+        try: 
+            projeto = self.recuperar_projeto(id_projeto=id_projeto)
+        except ProjetoNaoEncontradoException as excecao:
+            raise excecao
+        if (projeto_alteracao.nome != None and projeto_alteracao.nome != ""):
+            projeto.nome = projeto_alteracao.nome
+        
+        if (projeto_alteracao.descricao != None and projeto_alteracao.descricao != ""):
+            projeto.descricao = projeto_alteracao.descricao
+        
+        try:
+            self.db_session.commit()
+        except Exception:
+            traceback.print_exc()
+            self.db_session.rollback()
+            raise ErroAoInserirProjeto(f"Não foi possível editar o projeto '{projeto.titulo}'")
 
-    def editar_descricao(self, id_projeto, novoValorCampo):
-        projeto = self.db_session.query(ProjetoModel).filter_by(id_projeto=id_projeto).first()
-        projeto.descricao = novoValorCampo
-        self.db_session.commit()
-        self.db_session.refresh(projeto)
+    def recuperar_projeto(self, id_projeto: int):
+        try:
+            projeto = self.db_session.query(ProjetoModel).filter_by(id_projeto=id_projeto).first()
+            return projeto
+        except Exception:
+            raise ProjetoNaoEncontradoException(f"Projeto com id='{id_projeto}' não encontrado")
 
     def deletar_projeto(self, id_projeto):
         projeto = self.db_session.query(ProjetoModel).filter_by(id_projeto=id_projeto).first()
-        # todo: precisa antes deletar os participantes da tabela projeto_participantes
-        self.db_session.delete(projeto)
-        self.db_session.commit()
-
-
-    def listar_tarefas(self, projeto_id: int, etapa_id: int):
-        # Lógica para listar as tarefas de uma etapa específica de um projeto
-        projeto = self.db_session.query(ProjetoModel).filter_by(id_projeto=projeto_id).first()
 
         if not projeto:
-            return None, JSONResponse(
-                content={'error': 'Projeto não encontrado'},
-                status_code=status.HTTP_404_NOT_FOUND
-            )
-
-        etapa = self.db_session.query(EtapaModel).filter_by(id_etapa = etapa_id).first()
-
-        if not etapa:
-            return None, JSONResponse(
-                content={'error': 'Etapa não encontrada'},
-                status_code=status.HTTP_404_NOT_FOUND
-            )
-
-        tarefas = self.db_session.query(TarefaModel).filter_by(id_etapa = etapa_id).all()
-
-        tarefas_dict = []
-        for tarefa in tarefas:
-            tarefa_dict = {
-                'id': tarefa.id_tarefa,
-                'descricao': tarefa.descricao,
-            }
-            tarefas_dict.append(tarefa_dict)
+            return JSONResponse(
+                    content={
+                        'msg': "Projeto não encontrado"
+                    },
+                    status_code=status.HTTP_404_NOT_FOUND
+                )
         
-        return tarefas_dict, None
-    
-    def listar_comentarios(self, projeto_id: int, etapa_id: int, tarefa_id: int):
-        # Lógica para listar os comentários de uma tarefa específica
-        projeto = self.db_session.query(ProjetoModel).filter_by(id_projeto = projeto_id).first()
+        participantes = self.db_session.query(ProjetoParticipanteModel).filter_by(id_projeto = id_projeto).all()
+        
+        try:
+            for participante in participantes:
+                self.db_session.delete(participante)
+        except(Exception):
+            self.db_session.rollback()
+            return JSONResponse(
+                content={
+                        'msg': "Erro ao apagar Projeto-Participante"
+                    },
+                    status_code=status.HTTP_400_BAD_REQUEST
+            )
 
+        self.db_session.commit()
+
+        etapas = self.db_session.query(EtapaModel).filter_by(id_projeto=id_projeto).all()
+
+        for etapa in etapas: EtapaService.deletar_etapa(self=self, etapa_id=etapa.id_etapa)
+
+        try:
+            self.db_session.delete(projeto)
+        except(IntegrityError):
+            self.db_session.rollback()
+            return JSONResponse(
+                content={
+                        'msg': "Erro ao apagar Projeto"
+                    },
+                    status_code=status.HTTP_400_BAD_REQUEST
+            )
+        
+        self.db_session.commit()
+
+        return JSONResponse(
+                content={
+                        'msg': "Projeto apagado com sucesso"
+                    },
+                    status_code=status.HTTP_200_OK
+            )
+
+    def listar_projeto_completo(self, id_projeto):
+        projeto = self.db_session.query(ProjetoModel).filter_by(id_projeto=id_projeto).first()
+        
         if not projeto:
             return None, JSONResponse(
-                content={'error': 'Projeto não encontrado'},
-                status_code=status.HTTP_404_NOT_FOUND
-            )
+                    content={
+                        'msg': "Projeto não encontrado"
+                    },
+                    status_code=status.HTTP_404_NOT_FOUND
+                )
 
-        etapa = self.db_session.query(EtapaModel).filter_by(id_etapa = etapa_id).first()
-
-        if not etapa:
-            return None, JSONResponse(
-                content={'error': 'Etapa não encontrada'},
-                status_code=status.HTTP_404_NOT_FOUND
-            )
-
-        tarefa = self.db_session.query(TarefaModel).filter_by(id_tarefa = tarefa_id).first()
-
-        if not tarefa:
-            return None, JSONResponse(
-                content={'error': 'Tarefa não encontrada'},
-                status_code=status.HTTP_404_NOT_FOUND
-            )
-
-        comentarios = self.db_session.query(ComentarioModel).filter_by(id_tarefa = tarefa_id).all()
-
-        comentarios_dict = []
-        for comentario in comentarios:
-            comentario_dict = {
-                'id': comentario.id_comentario,
-                'descricao': comentario.descricao
-            }
-            comentarios_dict.append(comentario_dict)
+        projetos_dict = []
         
-        return comentarios_dict, None
-    
-    def adicionar_comentario(self, tarefa_id: int, comentario: Comentario):
-        # Lógica para adicionar um comentário a uma tarefa específica
-        tarefa = self.db_session.query(TarefaModel).filter_by(id_tarefa=tarefa_id).first()
+        projeto_dict = {
+            "id": projeto.id_projeto,
+            "nome": projeto.nome,
+            "descricao": projeto.descricao,
+            "etapas": []
+        }
 
-        if not tarefa:
-            return None, JSONResponse(
-                content={'error': 'Tarefa não encontrada'},
-                status_code=status.HTTP_404_NOT_FOUND
-            )
+        # Buscar as etapas do projeto
+        etapas = self.db_session.query(EtapaModel).filter_by(id_projeto = projeto.id_projeto).all()
 
-        novo_comentario = ComentarioModel(
-            id_criador = comentario.id_criador,
-            id_tarefa = tarefa_id,
-            descricao = comentario.descricao
-        )
+        for etapa in etapas:
+            etapa_dict = {
+                "id": etapa.id_etapa,
+                "titulo": etapa.nome,
+                "tarefas": []
+            }
 
-        self.db_session.add(novo_comentario)
+            # Buscar as tarefas da etapa
+            tarefas = self.db_session.query(TarefaModel).filter_by(id_etapa = etapa.id_etapa).all()
+
+            for tarefa in tarefas:
+                tarefa_dict = {
+                    "id": tarefa.id_tarefa,
+                    "descricao": tarefa.descricao,
+                    "comentarios": []
+                }
+
+                # Buscar os comentários da tarefa
+                comentarios = self.db_session.query(ComentarioModel).filter_by(id_tarefa=tarefa.id_tarefa).all()
+
+                for comentario in comentarios:
+                    comentario_dict = {
+                        "id": comentario.id_comentario,
+                        "descricao": comentario.descricao
+                    }
+                    tarefa_dict["comentarios"].append(comentario_dict)
+
+                etapa_dict["tarefas"].append(tarefa_dict)
+
+            projeto_dict["etapas"].append(etapa_dict)
+
+        projetos_dict.append(projeto_dict)
+            
+        return projetos_dict, None
+
+    def add_participante(self, id_projeto, email):
+        us = UsuarioLoginService(db_session=self.db_session)
+        id_usuario = us.obtem_id_usuario(email=email)
+        self.relacionar_projeto_participante(id_projeto=id_projeto, id_participante=id_usuario)
         self.db_session.commit()
 
-        return JSONResponse(
-            content={'msg': f"Comentário adicionado à tarefa {tarefa_id}"},
-            status_code=status.HTTP_201_CREATED
-        ), None
-    
-    def editar_comentario(self, tarefa_id: int, comentario_id: int, comentario: str):
-        # Lógica para modificar um comentário em uma tarefa específica
-        tarefa = self.db_session.query(TarefaModel).filter_by(id_tarefa=tarefa_id).first()
 
-        if not tarefa:
-            return None, JSONResponse(
-                content={'error': 'Tarefa não encontrada'},
-                status_code=status.HTTP_404_NOT_FOUND
-            )
-
-        comentario_modificado = self.db_session.query(ComentarioModel).filter_by(id_comentario=comentario_id).first()
-
-        if not comentario_modificado:
-            return None, JSONResponse(
-                content={'error': 'Comentário não encontrado'},
-                status_code=status.HTTP_404_NOT_FOUND
-            )
-
-        comentario_modificado.descricao = comentario
-        self.db_session.commit()
-
-        return JSONResponse(
-            content={'msg': f"Comentário {comentario_id} modificado na tarefa {tarefa_id}"},
-            status_code=status.HTTP_200_OK
-        ), None
-    
-    def excluir_comentario(self, tarefa_id: int, comentario_id: int):
-        # Lógica para remover um comentário de uma tarefa específica
-        tarefa = self.db_session.query(TarefaModel).filter_by(id_tarefa=tarefa_id).first()
-
-        if not tarefa:
-            return None, JSONResponse(
-                content={'error': 'Tarefa não encontrada'},
-                status_code=status.HTTP_404_NOT_FOUND
-            )
-
-        comentario_removido = self.db_session.query(ComentarioModel).filter_by(id_comentario = comentario_id).first()
-
-        if not comentario_removido:
-            return None, JSONResponse(
-                content={'error': 'Comentário não encontrado'},
-                status_code=status.HTTP_404_NOT_FOUND
-            )
-
-        self.db_session.delete(comentario_removido)
-        self.db_session.commit()
-
-        return JSONResponse(
-            content={'msg': f"Comentário {comentario_id} removido da tarefa {tarefa_id}"},
-            status_code=status.HTTP_200_OK
-        ), None
+class ProjetoNaoEncontradoException(Exception):
+    def __init__ (self, mensagem):
+        self.mensagem = mensagem
+        
+    def getMensagem(self):
+        return self.mensagem
     
     
+class ErroAoInserirProjeto(Exception):
+    def __init__ (self, mensagem):
+        self.mensagem = mensagem
+        
+    def getMensagem(self):
+        return self.mensagem

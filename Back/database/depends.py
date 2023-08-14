@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from fastapi import Depends
 
 
-oauth_scheme = OAuth2PasswordBearer(tokenUrl='/usuario/login')
+oauth_scheme = OAuth2PasswordBearer(tokenUrl='usuario/login')
 
 def get_db_session():
     try:

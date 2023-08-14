@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from jose import jwt, JWTError
 from datetime import datetime, timedelta
 from decouple import config
+from email_validator import EmailNotValidError, validate_email
 
 SECRET_KEY = config('SECRET_KEY')
 ALGORITHM = config('ALGORITHM')
@@ -21,11 +22,29 @@ class UsuarioLoginService:
         self.db_session = db_session
 
     def registrar_usuario_login(self, usuario: UsuarioLogin):
+        email_valido = self.validar_email(usuario.email)
+
+        if not email_valido:
+            raise HTTPException(
+                detail='Endereço de email invalido',
+                status_code=status.HTTP_406_NOT_ACCEPTABLE
+            )
+        
         usuario_login_model = UsuarioLoginModel(
             username=usuario.username,
             senha=crypt_context.hash(usuario.senha),
             email=usuario.email
         )
+
+        username_ja_cadastrado = self.db_session.query(UsuarioLoginModel).filter_by(username=usuario.username).first()
+        email_ja_cadastrado = self.db_session.query(UsuarioLoginModel).filter_by(email=usuario.email).first()
+
+        if username_ja_cadastrado is not None or email_ja_cadastrado is not None:
+            raise HTTPException(
+                detail="Username ou Email já cadastrados para outro LOGIN!",
+                status_code=status.HTTP_401_UNAUTHORIZED
+            )
+
         try:
             self.db_session.add(usuario_login_model)
             self.db_session.commit()
@@ -35,6 +54,14 @@ class UsuarioLoginService:
                 detail="Erro ao inserir login do usuario",
                 status_code=status.HTTP_400_BAD_REQUEST
             )
+
+    def validar_email(self, email:str):
+        try:
+            validate_email(email, check_deliverability=False)
+            return True
+
+        except EmailNotValidError as e:
+            return False
 
     def registrar_usuario(self, usuario: Usuario, id_credencial: int):
         usuario_model = UsuarioModel(
@@ -92,17 +119,45 @@ class UsuarioLoginService:
         exp = datetime.utcnow() + timedelta(minutes=expires_in)
 
         payload = {
-            'sub': usuario.username,
+            'sub': usuario_back.username,
             'exp': exp,
         }
 
         access_token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+        id_usuario = self.obtem_id_usuario_login(usuario_back.id_login)
 
         return {
             'access_token': access_token,
             'exp': exp.isoformat(),
-            'id_login': usuario_back.id_login
+            'id_login': usuario_back.id_login,
+            'id_usuario': id_usuario
         }
+
+    def obtem_id_usuario_login(self, id_login):
+        usuario_back = self.db_session.query(UsuarioModel).filter_by(id_credencial=id_login).first()
+
+        if usuario_back is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail='O usuário não foi cadastrado!'
+            )
+
+        return usuario_back.id_usuario
+
+    def logout_usuario(self, token: str):
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        except jwt.ExpiredSignatureError:
+            payload = None
+
+        if payload:
+            payload['exp'] = datetime.utcnow()
+            return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+        else:
+            return JSONResponse(
+                content={"message": "Token inválido ou expirado"},
+                status_code=status.HTTP_400_BAD_REQUEST
+            )
 
     def verify_token(self, access_token):
         try:
@@ -149,3 +204,15 @@ class UsuarioLoginService:
         self.db_session.commit()
         self.db_session.refresh(login_back)
         return login_back
+
+    def obtem_id_usuario(self, email):
+        login_back = self.db_session.query(UsuarioLoginModel).filter_by(email=email).first()
+
+        if login_back is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail='Email do usuário não encontrado!'
+            )
+
+        usuario_back = self.db_session.query(UsuarioModel).filter_by(id_credencial=login_back.id_login).first()
+        return usuario_back.id_usuario

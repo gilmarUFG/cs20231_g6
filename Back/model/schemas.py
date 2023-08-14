@@ -1,7 +1,14 @@
 from pydantic import BaseModel, validator, EmailStr, Field
 import datetime
-import re
-from typing import List
+
+
+class Login(BaseModel):
+    username: str
+    senha: str
+
+
+class Logout(BaseModel):
+    token: str
 
 
 class Usuario(BaseModel):
@@ -14,13 +21,7 @@ class Usuario(BaseModel):
 class UsuarioLogin(BaseModel):
     username: str
     senha: str
-    email: EmailStr = Field(None)
-
-    @validator('username')
-    def validar_username(cls, value):
-        if not re.match('^([a-z]|[0-9]|@|_|-)+$', value):
-            raise ValueError('Formato invalido de nome de usuario')
-        return value
+    email: str = Field(None)
 
 
 class UsuarioAlterarSenha(BaseModel):
@@ -35,13 +36,13 @@ class Projeto(BaseModel):
     descricao: str
 
 
-class AlterarInfoProjeto(BaseModel):
-    nova_info: str
-
-
 class ProjetoParticipantes(BaseModel):
     id_projeto: int
     id_participante: int
+
+
+class BodyAdicionarParticipante(BaseModel):
+    email_novo_participante: str
 
 
 class Comentario(BaseModel):
@@ -52,11 +53,8 @@ class Comentario(BaseModel):
 class Tarefa(BaseModel):
     id_criador: int
     id_responsavel: int
-    id_etapa: int
     descricao: str
-    comentarios: List[Comentario]
 
 
 class Etapa(BaseModel):
     titulo: str
-    tarefas: List[Tarefa]
